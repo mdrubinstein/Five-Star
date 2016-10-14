@@ -6,7 +6,7 @@ output:
   flexdashboard::flex_dashboard:
     orientation: rows
     social: menu
-    source_code: 'https://github.com/mdrubinstein/FiveStar'
+    source_code: 'https://github.com/mdrubinstein/Five-Star'
 runtime: shiny
 ---
 
