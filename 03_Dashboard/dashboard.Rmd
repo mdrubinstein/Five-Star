@@ -1,0 +1,270 @@
+---
+title: "Hospital Star Ratings Data Explorer"
+resource files:
+- analyticfile.RDS
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    social: menu
+    source_code: 'https://github.com/mdrubinstein/FiveStar'
+runtime: shiny
+---
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r global, include = FALSE}
+# read libraries
+libs <- c("Hmisc", "jsonlite", "dplyr", "tidyr", "purrr", "ggplot2",
+          "leaflet", "RColorBrewer", "ggthemes", "shiny", "stringr")
+lapply(libs, require, character.only = T)
+source('helperfuns.R')
+```
+
+```{r}
+# UI Script
+analysislevelvars <- c("Overall Rating" = "hospital_overall_rating", "Measure Group" = "msrgrp")
+
+msrgrps <- c("Mortality" = "mortality_national_comparison",
+             "Effective Use of Medical Imaging" = "efficient_use_of_medical_imaging_national_comparison",
+             "Patient Experience" = "patient_experience_national_comparison",
+             "Effectiveness of Care" = "effectiveness_of_care_national_comparison",
+             "Readmissions" = "readmission_national_comparison",
+             "Safety of Care" = "safety_of_care_national_comparison",
+             "Timeliness of Care" = "timeliness_of_care_national_comparison")
+
+checkboxGroupInput("displayStars", "Display These Hospitals", choices = c(
+             `One-star` = "1",
+             `Two-stars` = "2",
+             `Three-stars` = "3",
+             `Four-stars` = "4",
+             `Five-stars` = "5",
+             `Not-available` = "Not Available"), selected = c("1", "2", "3", "4", "5", "Not Available"))
+
+selectInput('analysislevel', 'Choose Analysis Level', analysislevelvars)
+
+conditionalPanel(condition = "input.analysislevel == 'msrgrp'",
+  selectizeInput('msrgrps', "Choose Measure Groups", msrgrps, selected = msrgrps[1], multiple = TRUE))
+
+conditionalPanel(condition = "input.analysislevel == 'msrgrp'",
+  selectInput('bucketselect', 'Highlight this Subset', 
+  c('All Selected Groups' = 'all',
+   'Any Selected Group' = 'any')))
+
+conditionalPanel(condition = "input.analysislevel == 'msrgrp' && input.bucketselect == 'any'",
+  selectInput('highlight', 'Highlight this Performance Category', 
+  c('Better' = 'better',
+  'Worse' = 'worse')))
+```
+
+```{r, include=FALSE}
+# server Script
+stars <- readRDS('analyticfile.RDS')
+
+msrgrpsDebounced <- debounce({
+  input$msrgrps}, 1500
+)
+
+starsDebounced <- debounce({
+  input$displayStars}, 1500
+)
+
+inputs <- reactive({
+# create reactive variables from measure group input list
+replacements.better <- list('Worse than the National average' = '0',
+                     'Not Available' = '0',
+                     'Better than the National average' = '1',
+                     'Same as the National average' = '0')
+  
+replacements.worse <- list('Worse than the National average' = '1',
+                      'Not Available' = '0',
+                      'Better than the National average' = '0',
+                      'Same as the National average' = '0')
+  
+replacelist <-        list(replacements.better, replacements.worse) %>%
+                      purrr::set_names(c('better', 'worse'))
+
+for(i in 1:length(replacelist)){
+  for(j in 1:length(msrgrpsDebounced())){
+    newname <- paste0(msrgrpsDebounced()[j], "_", names(replacelist)[i], "_", j)
+    stars[[newname]] <- as.numeric(str_replace_all(stars[[msrgrpsDebounced()[j]]], replacelist[[i]]))
+  }
+  calcString <- sprintf('%s_%s_%s', msrgrpsDebounced(), names(replacelist)[i], 1:length(msrgrpsDebounced())) %>% paste(collapse = '+')
+  countVarAny <- paste0('msr_grp_count', '_', names(replacelist)[[i]])
+  countVarAll <- paste0(countVarAny, '_i')
+  stars[[countVarAny]] <- with(stars, eval(parse(text = calcString)))
+  stars[[countVarAll]] <- with(stars, ifelse(get(countVarAny) == length(msrgrpsDebounced()), 1, 0))
+}
+
+stars[['msr_grp_count_all']] <- with(stars, msr_grp_count_better_i - msr_grp_count_worse_i) %>% as.character() %>%
+  stringr::str_replace('-1', "Worse") %>% 
+  stringr::str_replace('0', "Average/Not Available") %>%
+  stringr::str_replace('1', "Better")
+
+# create reactive color palettes
+colorData <- switch(input$analysislevel,
+                    hospital_overall_rating = factor(stars$hospital_overall_rating),
+                    msrgrp = switch(input$bucketselect,
+                                    all = factor(stars[['msr_grp_count_all']], levels = c("Worse", "Average/Not Available", "Better")),
+                                    any = switch(input$highlight,
+                                      better = factor(stars[['msr_grp_count_better']], levels = c(0:7)),
+                                      worse = factor(stars[['msr_grp_count_worse']], levels = c(0:7)))
+                                      ))
+
+colors <- switch(input$analysislevel,
+                 hospital_overall_rating = c(brewer.pal(5, "RdYlGn"), "#d3d3d3"),
+                 msrgrp = switch(input$bucketselect,
+                                 all = c('#EF3B2C', '#d3d3d3', '#41AB5D'),
+                                 any = switch(input$highlight,
+                                   better = c('#d3d3d3', brewer.pal(7, "Greens")),
+                                   worse = c('#d3d3d3', brewer.pal(7, "Reds"))
+                                  )))
+
+# subset data by stars selected and apply to color vectors
+keepRows <- grep("TRUE", stars$hospital_overall_rating %in% starsDebounced())
+subset <- stars[keepRows,]
+
+# subset color data
+colorData <- colorData[keepRows]  
+pal <- colorFactor(colors, colorData)
+
+# create reactive legend label (and side graph label)
+xlabel <- switch(input$analysislevel,
+         hospital_overall_rating = "Number of Stars",
+         msrgrp = switch(input$bucketselect,
+                         all = "Performance Categories",
+                         any = switch(input$highlight,
+                                      better = "Number of Measure <br> Groups: Better",
+                                      worse = "Number of Measure <br> Groups: Worse")))
+
+# output list of subset data and legend labels to use in reactive plots
+
+list(data = subset, pal = pal, colorData = colorData,
+     xlab = xlabel)
+})
+```
+
+Row {data-height=650}
+-----------------------------------------------------------------------
+
+### Explore the data
+
+```{r}
+
+leaflet::leafletOutput("map")
+
+output$map <- renderLeaflet({
+  leaflet() %>%
+  addProviderTiles("Stamen.Watercolor") %>%
+  addProviderTiles("Stamen.TonerHybrid") %>%
+  setView(
+          lng = -95.71289,
+          lat = 37.09024,
+          zoom = 4)
+})
+
+# update the leaflet map with colors, markers, and location
+reactive({
+  data <- inputs()$data
+  colorData <- inputs()$colorData
+  pal <- inputs()$pal
+  xlab <- inputs()$xlab  
+  
+# create reactive popup text 
+if(input$analysislevel == "hospital_overall_rating") {
+  popup <- with(data, 
+    paste("<u><strong>", hospital_name, "</u></strong>", "<br>", "<br>",
+         "Star-Rating:", hospital_overall_rating, "<br>", "<br>",
+         "Note: Three stars is average", "<br>"))
+  } else {
+  
+  popup <- with(data, 
+  paste("<u><strong>", hospital_name, "</u></strong>", "<br>", "<br>",
+  "Mortality:", mortality_national_comparison, "<br>",
+  "Efficient Use of Medical Imaging:", efficient_use_of_medical_imaging_national_comparison, "<br>",
+  "Patient Experience:", patient_experience_national_comparison, "<br>",
+  "Effectiveness of Care:", effectiveness_of_care_national_comparison, "<br>",
+  "Readmissions:", readmission_national_comparison, "<br>",
+  "Safety of Care:", safety_of_care_national_comparison, "<br>",
+  "Timeliness of Care:", timeliness_of_care_national_comparison, "<br>", "<br>",
+  "Overall Star Rating:", hospital_overall_rating, "<br>", "<br>"))
+}
+
+  leaflet::leafletProxy("map", data = data) %>% 
+  clearMarkers() %>% clearShapes() %>%
+  addCircleMarkers(lng = ~lon, lat = ~lat, stroke = FALSE, 
+  fillOpacity = 1, fillColor = pal(colorData), popup = popup,
+  radius = input$map_zoom) %>%
+  addLegend("bottomleft", pal = pal, values = colorData, 
+  title = xlab, opacity = 0.5, layerId = 'colorLegend')
+})
+```
+
+Row {data-height=375}
+-----------------------------------------------------------------------
+
+### Performance distribution
+
+```{r}
+
+subvars <- reactive({
+  switch(input$analysislevel,
+    hospital_overall_rating = "hospital_overall_rating",
+    msrgrp = switch(input$bucketselect,
+                    all = "msr_grp_count_all",
+                    any = switch(input$highlight,
+                                 better = "msr_grp_count_better",
+                                 worse = "msr_grp_count_worse")
+    ))
+})
+
+# output data in viewer to dataframe
+hospsInBounds <- reactive({
+  if(is.null(input$map_bounds))
+    return(as.data.frame(subset[FALSE,]))
+  bounds <- input$map_bounds
+  latRng <- range(bounds$north, bounds$south)
+  lngRng <- range(bounds$east, bounds$west)
+
+  newdata <- subset(inputs()$data,
+         lat >= latRng[1] & lat <= latRng[2] &
+         lon >= lngRng[1] & lon <= lngRng[2])
+  
+  plotData <- table(newdata[[subvars()]]) %>% as.data.frame()
+  plotData <- plotData %>% mutate(indicator = "In Viewer",
+                                  percent = 100*(Freq/sum(Freq, na.rm = T)))
+  return(plotData)
+})
+
+# output total subsetted data to dataframe
+sideplot <- reactive ({
+  allData <- table(inputs()$data[[subvars()]]) %>% as.data.frame()
+  allData <- allData %>% mutate(indicator = "All Hospitals",
+                                percent = 100*(Freq/sum(Freq, na.rm = T)))
+  a <- rbind(hospsInBounds(), allData)
+  a$indicator <- factor(a$indicator)
+  return(a)
+})
+
+# create barplot in side viewer ------------------------------------------------
+renderPlot({
+  ggplot2::ggplot(sideplot(), aes(x = Var1, y = percent)) + 
+    ggthemes::theme_hc() +
+    geom_bar(alpha = 0.5, aes(group = indicator, fill = indicator), 
+             stat = 'identity', position = 'dodge') +
+    scale_fill_manual(values = brewer.pal(3, "Set1")) +
+    scale_color_manual(values = brewer.pal(3, "Set1")) +
+    theme(axis.ticks.x = element_blank(), 
+          axis.ticks.y = element_blank(),
+          legend.title = element_blank()) +
+    ylab("% of Hospitals") + xlab(inputs()$xlab %>% stringr::str_replace('<br> ', ''))
+  })
+
+```
+
+### <a href = https://www.qualitynet.org/dcs/BlobServer?blobkey=id&blobnocache=true&blobwhere=1228890577152&blobheader=multipart%2Foctet-stream&blobheadername1=Content-Disposition&blobheadervalue1=attachment%3Bfilename%3DStar_Rtngs_CompMthdlgy_052016.pdf&blobcol=urldata&blobtable=MungoBlobs> About the data </a> 
+
+```{r}
+renderText({"CMS's hospital star rating system summarizes hospital performance on over fifty publicly reported hospital quality metrics (available on hospitalcompare.hhs.gov). To create these ratings, CMS first aggregates hospital performance for seven measure groups: mortality, safety of care, readmission, patient experience, effectiveness of care, timeliness of care, and efficient use of medical imaging. CMS then summarizes performance across these groups to calculate the star ratings. Use this explorer to view hospital quality by overall star rating and measure group performance. More information on the methodology is linked above."})
+
+```
