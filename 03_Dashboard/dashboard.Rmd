@@ -1,5 +1,5 @@
 ---
-title: "Hospital Star Ratings Data Explorer"
+title: "Hospital Star Ratings Data Explorer (October 2016)"
 resource files:
 - analyticfile.RDS
 output: 
@@ -59,7 +59,7 @@ conditionalPanel(condition = "input.analysislevel == 'msrgrp' && input.bucketsel
 
 ```{r, include=FALSE}
 # server Script
-stars <- readRDS('analyticfile.RDS')
+stars <- readRDS('03_Dashboard/analyticfile_oct.RDS')
 
 msrgrpsDebounced <- debounce({
   input$msrgrps}, 1500
